@@ -1,47 +1,36 @@
+// Updated Backend Code with Mongoose and JWT (No Cookies)
+
 const express = require('express');
-const { MongoClient } = require('mongodb');
+const mongoose = require('mongoose');
 const cors = require('cors');
 const multer = require('multer');
 const path = require('path');
-
-const fs = require('fs-extra'); // ✅ not just 'fs'
-
+const fs = require('fs-extra');
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcrypt');
-const JWT_SECRET = process.env.JWT_SECRET || 'your-very-secure-secret';
-const cookieParser = require('cookie-parser');
-const { ObjectId } = require('mongodb');
-
-
-
+const userRouter=require('./routes/userRoutes');
 require('dotenv').config();
 
+const User = require('./models/userModel');
+const Property = require('./models/prodModel');
+
+const JWT_SECRET = process.env.JWT_SECRET || 'your-very-secure-secret';
 const app = express();
 
-
 // Middleware
-app.use(cors({
-  origin: 'http://localhost:3000',  // frontend origin
-  credentials: true 
+app.use(cors({ origin: 'http://localhost:3000',
+  methods: ['GET', 'POST', 'PUT', 'DELETE'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  credentials: true
 }));
-app.use(cookieParser());
-app.use(express.json()); // to parse JSON request bodies
-
-// MongoDB Atlas connection URI
-
-const PORT = process.env.PORT || 5000;
-const uri = process.env.MONGODB_URI;
-const client = new MongoClient(uri);
-let usersCollection;
-let propertiesCollection;
-let adminsCollection;
+app.use(express.json());
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
+app.use('/',userRouter);
 
-
+// Auth Middleware
 const authMiddleware = (req, res, next) => {
-  const token = req.cookies.token;
+  const token = req.headers.authorization?.split(' ')[1];
   if (!token) return res.status(401).json({ message: 'Unauthorized' });
-
   try {
     const decoded = jwt.verify(token, JWT_SECRET);
     req.user = decoded;
@@ -51,454 +40,201 @@ const authMiddleware = (req, res, next) => {
   }
 };
 
-
-async function connectToDatabase() {
+const connectDB = async () => {
   try {
-    await client.connect();
-    const db = client.db('rrconsultancy'); // change to your DB
-    usersCollection = db.collection('users');
-    propertiesCollection = db.collection('properties');
-    adminsCollection=db.collection('admins');
-    console.log('Connected to MongoDB Atlas');
-  } catch (error) {
-    console.error('MongoDB connection failed:', error);
-  }
-}
-
-// API: Signup
-app.post('/api/signup', async (req, res) => {
-  const { username, email, password, phonenumber } = req.body;
-
-  if (!username || !email || !password || !phonenumber) {
-    return res.status(400).json({ message: 'All fields are required' });
-  }
-
-  try {
-    const existingUser = await usersCollection.findOne({ email });
-
-    if (existingUser) {
-      return res.status(409).json({ message: 'User already exists' });
-    }
-
-    // Hash the password
-    const saltRounds = 10;
-    const hashedPassword = await bcrypt.hash(password, saltRounds);
-
-    const newUser = {
-      username,
-      email,
-      password: hashedPassword, // Store hashed password
-      phonenumber,
-      wishlist: [],
-    };
-
-    await usersCollection.insertOne(newUser);
-    res.status(201).json({ message: 'Signup successful' });
+    await mongoose.connect(process.env.MONGO_URI);
+    console.log("Connected to DB");
   } catch (err) {
-    console.error('Signup error:', err);
-    res.status(500).json({ message: 'Server error' });
+    console.error("Mongodb connected failed", err);
+    process.exit(1);
   }
-});
+};
 
-// API: Login
-app.post('/api/login', async (req, res) => {
-  const { email, password } = req.body;
+// MongoDB Connection with Mongoose
 
-  try {
-    const user = await usersCollection.findOne({ email });
-    if (!user) return res.status(401).json({ message: 'Invalid credentials' });
 
-    const validPassword = await bcrypt.compare(password, user.password);
-    if (!validPassword) return res.status(401).json({ message: 'Invalid credentials' });
+// Signup
 
-    // Create JWT token
-    const token = jwt.sign(
-      { id: user._id, email: user.email, username: user.username,isadmin:user.isadmin},
-      JWT_SECRET,
-      { expiresIn: '1d' }
-    );
-
-    // Send as HttpOnly cookie
-    res.cookie('token', token, {
-      httpOnly: true,
-      secure: false,        // set true in production (HTTPS only)
-      sameSite: 'Lax',  // prevent CSRFs
-      maxAge: 24 * 60 * 60 * 1000
-    });
-
-    // Also send minimal user info if needed
-    res.status(200).json({ message: 'Login successful', user: { email: user.email, username: user.username } });
-
-  } catch (err) {
-    console.error('Login error:', err);
-    res.status(500).json({ message: 'Server error' });
-  }
-});
+// Get Current User
 app.get('/api/me', authMiddleware, async (req, res) => {
   try {
-    const { ObjectId } = require('mongodb');
-    const userDoc = await usersCollection.findOne({ _id: new ObjectId(req.user.id) });
-
-    if (!userDoc) return res.status(404).json({ message: 'User not found' });
-
-    res.status(200).json({
-      username: userDoc.username,
-      email: userDoc.email,
-      wishlist: userDoc.wishlist || [],
-      isadmin:userDoc.isadmin,
-    });
+    const user = await User.findById(req.user.id);
+    if (!user) return res.status(404).json({ message: 'User not found' });
+    res.json({ username: user.username, email: user.email, wishlist: user.wishlist || [], isadmin: user.isadmin });
   } catch (err) {
-    console.error('/api/me error:', err);
     res.status(500).json({ message: 'Server error' });
   }
 });
 
-
-
-// Ensure upload folders exist
+// Multer Setup
 const uploadDir = path.join(__dirname, 'uploads');
 const imageDir = path.join(uploadDir, 'images');
 const videoDir = path.join(uploadDir, 'videos');
 const documentDir = path.join(uploadDir, 'documents');
+[uploadDir, imageDir, videoDir, documentDir].forEach(fs.ensureDirSync);
 
-[uploadDir, imageDir, videoDir, documentDir].forEach(dir => {
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-});
-
-// Multer setup for file uploads
 const storage = multer.diskStorage({
-  destination: function (req, file, cb) {
+  destination: (req, file, cb) => {
     if (file.mimetype.startsWith('image/')) cb(null, imageDir);
     else if (file.mimetype.startsWith('video/')) cb(null, videoDir);
     else if (file.mimetype === 'application/pdf') cb(null, documentDir);
     else cb(null, uploadDir);
   },
-  filename: function (req, file, cb) {
-    cb(null, `${Date.now()}-${file.originalname}`);
-  }
+  filename: (req, file, cb) => cb(null, `${Date.now()}-${file.originalname}`)
 });
-const upload = multer({ storage: storage });
+const upload = multer({ storage });
 
-app.post('/api/properties',authMiddleware, upload.fields([
-  { name: 'images' },
-  { name: 'video', maxCount: 1 },
-  { name: 'documents' }
-]), async (req, res) => {
+// Upload Property
+app.post('/api/properties', authMiddleware, upload.fields([{ name: 'images' }, { name: 'video', maxCount: 1 }, { name: 'documents' }]), async (req, res) => {
   try {
-    const formData = req.body;
-
-    const images = (req.files['images'] || []).map(file => `/uploads/images/${file.filename}`);
+    const images = (req.files['images'] || []).map(f => `/uploads/images/${f.filename}`);
     const video = req.files['video'] ? `/uploads/videos/${req.files['video'][0].filename}` : null;
-    const documents = (req.files['documents'] || []).map(file => `/uploads/documents/${file.filename}`);
-
-    const property = {
-      ...formData,
+    const documents = (req.files['documents'] || []).map(f => `/uploads/documents/${f.filename}`);
+    const property = new Property({
+      ...req.body,
       ownerId: req.user.id,
-      loanFacility: formData.loanFacility === 'true',
+      loanFacility: req.body.loanFacility === 'true',
       images,
       video,
       documents,
       status: 'Under Review',
       uploadedAt: new Date()
-    };
-
-    await propertiesCollection.insertOne(property);
-
+    });
+    await property.save();
     res.status(201).json({ message: 'Property uploaded successfully', property });
   } catch (err) {
-    console.error('Error uploading property:', err);
     res.status(500).json({ message: 'Error uploading property' });
   }
 });
+
+// Get User Properties
 app.get('/api/my-properties', authMiddleware, async (req, res) => {
   try {
-    const properties = await propertiesCollection
-      .find({ ownerId: req.user.id })
-      .toArray();
+   
+
+    const properties = await Property.find({ ownerId: req.user.id });
     res.json(properties);
     
   } catch (err) {
-    console.error('Error fetching user properties:', err);
     res.status(500).json({ message: 'Failed to fetch user properties' });
   }
 });
 
-
-// Get approved properties
-app.get('/api/properties',async (req, res) => {
+// Get Approved Properties
+app.get('/api/properties', async (req, res) => {
   try {
-    const properties = await propertiesCollection.find({ status: 'Approved' }).toArray();
+    const properties = await Property.find({ status: 'Approved' });
     res.json(properties);
   } catch (err) {
-    console.error('Error fetching properties:', err);
     res.status(500).json({ message: 'Failed to fetch properties' });
   }
 });
-app.get('/property/:id',authMiddleware, async (req, res) => {
-  const { id } = req.params;
+
+// Update Property
+app.put('/api/property/:id', upload.fields([{ name: 'images' }, { name: 'video', maxCount: 1 }, { name: 'documents' }]), async (req, res) => {
   try {
-    const property = await Property.findById(id);
-    if (!property) return res.status(404).json({ message: 'Property not found' });
-    res.json(property);
+    const id = req.params.id;
+    const existingProperty = await Property.findById(id);
+    if (!existingProperty) return res.status(404).json({ message: 'Property not found' });
+
+    const { existingImages, existingVideo, existingDocuments } = req.body;
+    const newImages = (req.files['images'] || []).map(f => `/uploads/images/${f.filename}`);
+    const newVideo = req.files['video']?.[0] ? `/uploads/videos/${req.files['video'][0].filename}` : null;
+    const newDocuments = (req.files['documents'] || []).map(f => `/uploads/documents/${f.filename}`);
+
+    const updatedImages = JSON.parse(existingImages || '[]');
+    const updatedDocs = JSON.parse(existingDocuments || '[]');
+
+    for (const oldImg of existingProperty.images || []) if (!updatedImages.includes(oldImg)) fs.unlinkSync(path.join(__dirname, oldImg));
+    for (const oldDoc of existingProperty.documents || []) if (!updatedDocs.includes(oldDoc)) fs.unlinkSync(path.join(__dirname, oldDoc));
+    if (existingProperty.video && existingProperty.video !== existingVideo) fs.unlinkSync(path.join(__dirname, existingProperty.video));
+
+    Object.assign(existingProperty, {
+      ...req.body,
+      loanFacility: req.body.loanFacility === 'true' || req.body.loanFacility === true,
+      images: [...updatedImages, ...newImages],
+      video: newVideo || existingVideo || null,
+      documents: [...updatedDocs, ...newDocuments],
+      status: req.body.status || 'Under Review',
+      tag: req.body.tag || ''
+    });
+
+    await existingProperty.save();
+    res.json({ message: 'Property updated successfully' });
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ message: 'Server error' });
+    res.status(500).json({ message: 'Server error while updating property' });
   }
 });
 
-app.put('/api/property/:id',
-  upload.fields([
-    { name: 'images', maxCount: 100 },
-    { name: 'video', maxCount: 1 },
-    { name: 'documents', maxCount: 5 }
-  ]),
-  async (req, res) => {
-    try {
-      const { id } = req.params;
-      const { ObjectId } = require('mongodb');
-      const existingProperty = await propertiesCollection.findOne({ _id: new ObjectId(id) });
-
-      if (!existingProperty) return res.status(404).json({ message: 'Property not found' });
-
-      const {
-        title,
-        area,
-        length,
-        breadth,
-        shape,
-        soilColor,
-        price,
-        location,
-        description,
-        loanFacility,
-        ownerName,
-        ownerPhone,
-        ownerAadhar,
-        existingImages,
-        existingVideo,
-        existingDocuments
-      } = req.body;
-
-      const newImages = (req.files['images'] || []).map(f => `/uploads/images/${f.filename}`);
-      const newVideo = req.files['video']?.[0] ? `/uploads/videos/${req.files['video'][0].filename}` : null;
-      const newDocuments = (req.files['documents'] || []).map(f => `/uploads/documents/${f.filename}`);
-
-      const updatedImages = JSON.parse(existingImages || '[]');
-      const updatedDocs = JSON.parse(existingDocuments || '[]');
-
-      // Delete removed images
-      for (const oldImg of existingProperty.images || []) {
-        if (!updatedImages.includes(oldImg)) fs.unlinkSync(path.join(__dirname, oldImg));
-      }
-      for (const oldDoc of existingProperty.documents || []) {
-        if (!updatedDocs.includes(oldDoc)) fs.unlinkSync(path.join(__dirname, oldDoc));
-      }
-      if (existingProperty.video && existingProperty.video !== existingVideo) {
-        fs.unlinkSync(path.join(__dirname, existingProperty.video));
-      }
-
-      await propertiesCollection.updateOne(
-        { _id: new ObjectId(id) },
-        {
-          $set: {
-            title,
-            area,
-            length,
-            breadth,
-            shape,
-            soilColor,
-            price,
-            location,
-            description,
-            loanFacility: loanFacility === 'true' || loanFacility === true,
-            ownerName,
-            ownerPhone,
-            ownerAadhar,
-            images: [...updatedImages, ...newImages],
-            video: newVideo || existingVideo || null,
-            documents: [...updatedDocs, ...newDocuments],
-            status: req.body.status || 'Under Review',
-            tag:req.body.tag || '',
-          },
-        }
-      );
-
-      res.json({ message: 'Property updated successfully' });
-    } catch (err) {
-      console.error('Update failed:', err);
-      res.status(500).json({ message: 'Server error while updating property' });
-    }
-  }
-);
-
+// Delete Property
 app.delete('/api/property/:id', async (req, res) => {
   try {
-    const id = req.params.id;
-    const property = await propertiesCollection.findOne({ _id: new ObjectId(id) });
+    const property = await Property.findById(req.params.id);
     if (!property) return res.status(404).json({ message: 'Property not found' });
-
-    // Collect all media files into a single array (filter out null)
     const mediaFiles = [...(property.images || []), ...(property.documents || [])];
     if (property.video) mediaFiles.push(property.video);
-
-    // Delete media files from disk (use async/await for fs-extra)
-    await Promise.all(
-      mediaFiles.map(file => fs.remove(path.join(__dirname, '..', file)))
-    );
-
-    // Delete property from database
-    await propertiesCollection.deleteOne({ _id: new ObjectId(id)});
-
+    await Promise.all(mediaFiles.map(file => fs.remove(path.join(__dirname, file))));
+    await property.deleteOne();
     res.json({ message: 'Property deleted successfully' });
   } catch (err) {
-    console.error('Delete failed:', err);
     res.status(500).json({ message: 'Server error while deleting property' });
   }
 });
-app.post('/api/logout', (req, res) => {
-  res.clearCookie('token', {
-  httpOnly: true,
-  secure: false,
-  sameSite: 'Lax',
-  path: '/',
-}); // or the name you used when setting the cookie
-  res.status(200).json({ message: 'Logged out successfully' });
-});
-// POST: Add/Remove property from wishlist
+
+// Wishlist Toggle
 app.post('/api/wishlist/:propertyId', authMiddleware, async (req, res) => {
   const { propertyId } = req.params;
-  const userId = req.user.id;
-  const { ObjectId } = require('mongodb');
-
   try {
-    const user = await usersCollection.findOne({ _id: new ObjectId(userId) });
-
-    if (!user) return res.status(404).json({ message: 'User not found' });
-
-    // Correct comparison: convert ObjectId to string
-    const alreadyWishlisted = user.wishlist?.some(
-      id => id.toString() === propertyId
-    );
-
-    const updateOp = alreadyWishlisted
-      ? { $pull: { wishlist: new ObjectId(propertyId) } }
-      : { $addToSet: { wishlist: new ObjectId(propertyId) } };
-
-    await usersCollection.updateOne(
-      { _id: new ObjectId(userId) },
-      updateOp
-    );
-
-    res.status(200).json({
-      message: alreadyWishlisted ? 'Removed from wishlist' : 'Added to wishlist',
-    });
+    const user = await User.findById(req.user.id);
+    const alreadyWishlisted = user.wishlist.includes(propertyId);
+    if (alreadyWishlisted) {
+      user.wishlist.pull(propertyId);
+    } else {
+      user.wishlist.push(propertyId);
+    }
+    await user.save();
+    res.status(200).json({ message: alreadyWishlisted ? 'Removed from wishlist' : 'Added to wishlist' });
   } catch (err) {
-    console.error('Wishlist update failed:', err);
     res.status(500).json({ message: 'Server error' });
   }
 });
 
-
+// Get Wishlist
 app.get('/api/wishlist', authMiddleware, async (req, res) => {
-  const { ObjectId } = require('mongodb');
   try {
-    const user = await usersCollection.findOne({ _id: new ObjectId(req.user.id) });
-
-    if (!user || !user.wishlist || user.wishlist.length === 0) {
-      return res.json([]);
-    }
-
-    const wishlistedProperties = await propertiesCollection
-      .find({ _id: { $in: user.wishlist.map(id => new ObjectId(id)) } })
-      .toArray();
-
-    res.json(wishlistedProperties);
+    const user = await User.findById(req.user.id);
+    const properties = await Property.find({ _id: { $in: user.wishlist } });
+    res.json(properties);
   } catch (err) {
-    console.error('Error fetching wishlist:', err);
     res.status(500).json({ message: 'Failed to fetch wishlist' });
   }
 });
-app.post('/api/admin', async (req, res) => {
-  const { email, password } = req.body;
-   try{
-     const user=await adminsCollection.findOne({email});
-     if(!user){
-      return res.status(400).json({message:"Invalid credentials"});
 
-     }
-     const vp=await bcrypt.compare(password,user.password);
-     if(!user){
-      return res.status(400).json({message:"Invalid credentials"});
-     
-     }
-     const token=jwt.sign(
-       {id:user._id,email:user.email,username:user.username},
-       JWT_SECRET,
-       { expiresIn: '1h' }
-     );
-     res.cookie(token,{
-      httpOnly:true,
-      secure:false,
-      sameSite:'Lax',
-      maxAge:3600000
-     });
-     res.status(200).json({message:"login successful"});
-
-   }catch(err){
-      res.status(500).json({message:"server error"});
-   }
-  
-});
-// GET all properties with status 'Under Review'
-app.get('/api/admin/review-properties',authMiddleware, async (req, res) => {
+// Admin Review
+app.get('/api/admin/review-properties', authMiddleware, async (req, res) => {
+  if (!req.user) return res.status(403).json({ message: 'Access denied' });
   try {
-    const user = req.user; // Ensure user is extracted from middleware
-
-    if (!user || user.isadmin!== true) {
-      return res.status(403).json({ message: 'Access denied' });
-    }
-
-    const underReview = await propertiesCollection.find({ status: 'Under Review' }).toArray();
+    const underReview = await Property.find({ status: 'Under Review' });
     res.json(underReview);
-  
-  } catch (error) {
-    res.status(500).json({ message: 'Error fetching properties', error });
-  }
-});
-
-// POST: Admin approves or rejects a property
-app.post('/api/admin/review-properties/:id',authMiddleware, async (req, res) => {
-  try {
-    const { status, remarks, tag } = req.body;
-    const user = req.user;
-
-    if (!user || user.isadmin!== true) {
-      return res.status(403).json({ message: 'Access denied' });
-    }
-
-    if (!['Approved', 'Rejected'].includes(status)) {
-      return res.status(400).json({ message: 'Invalid status value' });
-    }
-
-    const updated = await propertiesCollection.findByIdAndUpdate(
-      req.params.id,
-      { status, remarks, tag },
-      { new: true }
-    );
-
-    res.json({ message: 'Property updated successfully', updated });
   } catch (err) {
-    res.status(500).json({ message: 'Failed to update property', err });
+    res.status(500).json({ message: 'Failed to fetch review properties' });
   }
 });
 
-
-
-
-
-// Start server after DB connection
-connectToDatabase().then(() => {
-  app.listen(PORT, () => {
-    console.log(`🚀 Server running on http://localhost:${PORT}`);
-  });
+app.post('/api/admin/review-properties/:id', authMiddleware, async (req, res) => {
+  if (!req.user.isadmin) return res.status(403).json({ message: 'Access denied' });
+  const { status, remarks, tag } = req.body;
+  if (!['Approved', 'Rejected'].includes(status)) return res.status(400).json({ message: 'Invalid status value' });
+  try {
+    await Property.findByIdAndUpdate(req.params.id, { status, remarks, tag });
+    res.json({ message: 'Property updated successfully' });
+  } catch (err) {
+    res.status(500).json({ message: 'Error updating property review status' });
+  }
 });
+
+// Start Server
+const PORT = process.env.PORT || 5000;
+connectDB();
+
+app.listen(PORT, () => console.log(`🚀 Server running on http://localhost:${PORT}`));
