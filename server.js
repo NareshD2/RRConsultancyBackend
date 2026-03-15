@@ -18,7 +18,7 @@ const JWT_SECRET = process.env.JWT_SECRET || 'your-very-secure-secret';
 const app = express();
 
 // Middleware
-app.use(cors({ origin: 'http://localhost:3000',
+app.use(cors({ origin: 'https://rrconsultancyfronted.onrender.com',
   methods: ['GET', 'POST', 'PUT', 'DELETE'],
   allowedHeaders: ['Content-Type', 'Authorization'],
   credentials: true
